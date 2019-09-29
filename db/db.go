@@ -1,242 +1,129 @@
 package db
 
 import (
+	"context"
+	"database/sql"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/jinzhu/gorm"
+	"github.com/pkg/errors"
+	"github.com/volatiletech/sqlboiler/boil"
+	"time"
 )
 
 type Config struct {
-	User     string
-	Password string
-	Protocol string
-	DBSchema string
-	Option   string
+	User            string
+	Password        string
+	Protocol        string
+	DBSchema        string
+	Option          string
+	MaxIdleConns    int
+	MaxOpenConns    int
+	ConnMaxLifetime time.Duration
 }
 
-var dbs map[string]*gorm.DB
+var dbs map[string]*sql.DB
 
-func Init(configs []Config, logWriter gorm.LogWriter) error {
-	dbs = make(map[string]*gorm.DB, 8)
+func Init(configs []Config, debugMode bool) error {
+	dbs = make(map[string]*sql.DB, 8)
 	for _, config := range configs {
 		connect := config.User + ":" + config.Password + "@" + config.Protocol + "/" + config.DBSchema + "?" + config.Option
-		db, err := gorm.Open("mysql", connect)
+		db, err := sql.Open("mysql", connect)
 		if err != nil {
 			return err
 		}
-		if logWriter != nil {
-			db.LogMode(true)
-			db.SetLogger(&gorm.Logger{
-				LogWriter: logWriter,
-			})
-		}
+		db.SetMaxIdleConns(config.MaxIdleConns)
+		db.SetMaxOpenConns(config.MaxOpenConns)
+		db.SetConnMaxLifetime(config.ConnMaxLifetime)
+
+		boil.SetDB(db)
 		dbs[config.DBSchema] = db
+	}
+	if debugMode {
+		boil.DebugMode = true
+		boil.DebugWriter = &Logger{}
 	}
 	return nil
 }
 
-type DB struct {
-	db       *gorm.DB
-	commited bool
+func Close() error {
+	for _, v := range dbs {
+		err := v.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-type Tx = DB
+type (
+	DB struct {
+		cx boil.ContextExecutor
+	}
+
+	Tx = DB
+)
 
 func GetDB(schema string) *DB {
 	return &DB{
-		db: dbs[schema].New(),
+		cx: dbs[schema],
 	}
 }
 
-func (s *DB) returnDB(db *gorm.DB) *DB {
-	s.db = db
-	return s
+func (d *DB) Exec(query string, args ...interface{}) (sql.Result, error) {
+	return d.cx.Exec(query, args...)
 }
 
-func (s *DB) Where(query interface{}, args ...interface{}) *DB {
-	return s.returnDB(s.db.Where(query, args...))
+func (d *DB) Query(query string, args ...interface{}) (*sql.Rows, error) {
+	return d.cx.Query(query, args...)
 }
 
-func (s *DB) Or(query interface{}, args ...interface{}) *DB {
-	return s.returnDB(s.db.Or(query, args...))
+func (d *DB) QueryRow(query string, args ...interface{}) *sql.Row {
+	return d.QueryRow(query, args...)
 }
 
-func (s *DB) Not(query interface{}, args ...interface{}) *DB {
-	return s.returnDB(s.db.Not(query, args...))
+func (d *DB) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	return d.cx.ExecContext(ctx, query, args...)
 }
 
-func (s *DB) Limit(limit interface{}) *DB {
-	return s.returnDB(s.db.Limit(limit))
+func (d *DB) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	return d.cx.QueryContext(ctx, query, args...)
 }
 
-func (s *DB) Offset(offset interface{}) *DB {
-	return s.returnDB(s.db.Offset(offset))
+func (d *DB) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	return d.cx.QueryRowContext(ctx, query, args...)
 }
 
-func (s *DB) Order(value interface{}, reorder ...bool) *DB {
-	return s.returnDB(s.db.Order(value, reorder...))
-}
-
-func (s *DB) Select(query interface{}, args ...interface{}) *DB {
-	return s.returnDB(s.db.Select(query, args...))
-}
-
-func (s *DB) Omit(columns ...string) *DB {
-	return s.returnDB(s.db.Omit(columns...))
-}
-
-func (s *DB) Group(query string) *DB {
-	return s.returnDB(s.db.Group(query))
-}
-
-func (s *DB) Having(query interface{}, values ...interface{}) *DB {
-	return s.returnDB(s.db.Having(query, values...))
-}
-
-func (s *DB) Joins(query string, args ...interface{}) *DB {
-	return s.returnDB(s.db.Joins(query, args...))
-}
-
-func (s *DB) Scopes(funcs ...func(*DB) *DB) *DB {
-	for _, f := range funcs {
-		s = f(s)
+func (d *DB) Begin(ctx context.Context, options *sql.TxOptions) (*Tx, error) {
+	db, ok := d.cx.(*sql.DB)
+	if !ok || db == nil {
+		return nil, errors.New("cannot get *sql.DB")
 	}
-	return s
+	tx, err := db.BeginTx(ctx, options)
+	if err != nil {
+		return nil, err
+	}
+	return &Tx{
+		cx: tx,
+	}, nil
 }
 
-func (s *DB) Unscoped() *DB {
-	return s.returnDB(s.db.Unscoped())
+func (d *DB) Commit() error {
+	if tx, ok := d.cx.(boil.ContextTransactor); ok && tx != nil {
+		return tx.Commit()
+	}
+	return errors.New("cannot commit")
 }
 
-func (s *DB) Attrs(attrs ...interface{}) *DB {
-	return s.returnDB(s.db.Attrs(attrs...))
-}
-
-func (s *DB) Assign(attrs ...interface{}) *DB {
-	return s.returnDB(s.db.Assign(attrs...))
-}
-
-func (s *DB) First(out interface{}, where ...interface{}) *DB {
-	return s.returnDB(s.db.First(out, where...))
-}
-
-func (s *DB) Take(out interface{}, where ...interface{}) *DB {
-	return s.returnDB(s.db.Take(out, where...))
-}
-
-func (s *DB) Last(out interface{}, where ...interface{}) *DB {
-	return s.returnDB(s.db.Last(out, where...))
-}
-
-func (s *DB) Find(out interface{}, where ...interface{}) *DB {
-	return s.returnDB(s.db.Find(out, where...))
-}
-
-func (s *DB) Preloads(out interface{}) *DB {
-	return s.returnDB(s.db.Preloads(out))
-}
-
-func (s *DB) Scan(dest interface{}) *DB {
-	return s.returnDB(s.db.Scan(dest))
-}
-
-func (s *DB) Pluck(column string, value interface{}) *DB {
-	return s.returnDB(s.db.Pluck(column, value))
-}
-
-func (s *DB) Count(value interface{}) *DB {
-	return s.returnDB(s.db.Count(value))
-}
-
-func (s *DB) Related(value interface{}, foreignKeys ...string) *DB {
-	return s.returnDB(s.db.Related(value, foreignKeys...))
-}
-
-func (s *DB) FirstOrInit(out interface{}, where ...interface{}) *DB {
-	return s.returnDB(s.db.FirstOrInit(out, where...))
-}
-
-func (s *DB) FirstOrCreate(out interface{}, where ...interface{}) *DB {
-	return s.returnDB(s.db.FirstOrCreate(out, where...))
-}
-
-func (s *DB) Update(attrs ...interface{}) *DB {
-	return s.returnDB(s.db.Update(attrs...))
-}
-
-func (s *DB) Updates(values interface{}, ignoreProtectedAttrs ...bool) *DB {
-	return s.returnDB(s.db.Updates(values, ignoreProtectedAttrs...))
-}
-
-func (s *DB) UpdateColumn(attrs ...interface{}) *DB {
-	return s.returnDB(s.db.UpdateColumn(attrs...))
-}
-
-func (s *DB) UpdateColumns(values interface{}) *DB {
-	return s.returnDB(s.db.UpdateColumns(values))
-}
-
-func (s *DB) Save(value interface{}) *DB {
-	return s.returnDB(s.db.Save(value))
-}
-
-func (s *DB) Create(value interface{}) *DB {
-	return s.returnDB(s.db.Create(value))
-}
-
-func (s *DB) Delete(value interface{}, where ...interface{}) *DB {
-	return s.returnDB(s.db.Delete(value, where...))
-}
-
-func (s *DB) Raw(sql string, values ...interface{}) *DB {
-	return s.returnDB(s.db.Raw(sql, values...))
-}
-
-func (s *DB) Exec(sql string, values ...interface{}) *DB {
-	return s.returnDB(s.db.Exec(sql, values...))
-}
-
-func (s *DB) Model(value interface{}) *DB {
-	return s.returnDB(s.db.Model(value))
-}
-
-func (s *DB) Table(name string) *DB {
-	return s.returnDB(s.db.Table(name))
-}
-
-func (s *DB) Debug() *DB {
-	return s.returnDB(s.db.Debug())
-}
-
-func (s *DB) Begin() *Tx {
-	s.commited = false
-	return s.returnDB(s.db.Begin())
-}
-
-func (s *DB) Commit() error {
-	db := s.db.Commit()
-	s.commited = db.Error == nil
-	return db.Error
-}
-
-func (s *DB) RollbackUnlessCommited() error {
-	if !s.commited {
-		return s.db.Rollback().Error
+func (d *DB) Rollback() error {
+	if tx, ok := d.cx.(boil.ContextTransactor); ok && tx != nil {
+		return tx.Rollback()
 	}
 	return nil
 }
 
-func (s *DB) Preload(column string, conditions ...interface{}) *DB {
-	return s.returnDB(s.db.Preload(column, conditions...))
-}
-
-func (s *DB) Set(name string, value interface{}) *DB {
-	return s.returnDB(s.db.Set(name, value))
-}
-
-func (s *DB) InstantSet(name string, value interface{}) *DB {
-	return s.returnDB(s.db.InstantSet(name, value))
-}
-
-func (s *DB) Error() error {
-	return s.db.Error
+func (d *DB) RollbackUnlessCommitted() error {
+	err := d.Rollback()
+	if err == sql.ErrTxDone {
+		return nil
+	}
+	return err
 }
