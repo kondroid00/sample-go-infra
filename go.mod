@@ -3,7 +3,7 @@ module github.com/kondroid00/sample-go-infra
 go 1.12
 
 require (
-	github.com/getsentry/sentry-go v0.3.1
+	github.com/getsentry/sentry-go v0.6.1
 	github.com/go-sql-driver/mysql v1.4.1
 	github.com/gomodule/redigo v2.0.0+incompatible
 	github.com/pkg/errors v0.8.1
